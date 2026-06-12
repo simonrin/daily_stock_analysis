@@ -235,16 +235,17 @@ def main() -> None:
         if code:
             codes_by_row[row_idx] = code
     ws.cell(row=2, column=quote_col).value = "行情/PEG"
-    for row_idx in range(3, ws.max_row + 1):
-        cell = ws.cell(row=row_idx, column=3)
-        cell.alignment = Alignment(
-            horizontal=cell.alignment.horizontal,
-            vertical=cell.alignment.vertical or "top",
-            text_rotation=cell.alignment.text_rotation,
-            wrap_text=False,
-            shrink_to_fit=cell.alignment.shrink_to_fit,
-            indent=cell.alignment.indent,
-        )
+    for col_idx in (3, 7):
+        for row_idx in range(2, ws.max_row + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.alignment = Alignment(
+                horizontal=cell.alignment.horizontal,
+                vertical=cell.alignment.vertical or "top",
+                text_rotation=cell.alignment.text_rotation,
+                wrap_text=False,
+                shrink_to_fit=cell.alignment.shrink_to_fit,
+                indent=cell.alignment.indent,
+            )
 
     token = find_token(Path(args.env))
     if token:
