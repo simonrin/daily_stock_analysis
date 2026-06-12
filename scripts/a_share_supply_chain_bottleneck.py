@@ -206,7 +206,7 @@ def rows_for_report(quotes: dict[str, str]) -> list[list[str]]:
     rows = []
     for c in CANDIDATES:
         rows.append([
-            f"产业链层级：{c.layer}；卡点环节：{c.bottleneck}",
+            f"{c.layer}/{c.bottleneck}",
             f"{c.company}（{c.ts_code}）",
             c.reason,
             f"{c.weekly_evidence}；证据强度：{c.evidence_strength}",
