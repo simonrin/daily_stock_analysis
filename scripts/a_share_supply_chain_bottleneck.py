@@ -34,7 +34,7 @@ HEADERS = [
     "公司/股票代码",
     "排序原因",
     "一周新增证据",
-    "行情区间",
+    "行情/PEG",
     "主要风险",
     "待验证事实/研究优先级",
 ]
@@ -115,10 +115,10 @@ def fetch_quotes(candidates: list[Candidate]) -> dict[str, str]:
     except Exception:
         return {c.ts_code: "行情待复核" for c in candidates}
 
-    ts.set_token(token)
     pro = ts.pro_api(token)
     wanted = {c.ts_code for c in candidates}
     quotes: dict[str, str] = {}
+    quote_dates: dict[str, str] = {}
 
     for trade_date in trade_dates():
         try:
@@ -132,32 +132,65 @@ def fetch_quotes(candidates: list[Candidate]) -> dict[str, str]:
             if code not in wanted or code in quotes:
                 continue
             close = float(row.get("close"))
-            amount = row.get("amount")
-            amount_text = ""
-            if amount is not None:
-                amount_text = f"，成交额 {float(amount) / 100000:.2f} 亿元"
-            quotes[code] = f"{trade_date[4:6]}-{trade_date[6:8]} 收盘 {close:.2f}{amount_text}"
+            quotes[code] = f"收盘 {close:.2f}"
+            quote_dates[code] = trade_date
         if wanted.issubset(quotes):
             break
 
-    ranges: dict[str, str] = {}
-    end = today_cn()
-    start = end - timedelta(days=120)
-    for code in wanted:
+    for code in wanted - set(quotes):
         try:
-            frame = pro.daily(ts_code=code, start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"))
+            frame = pro.daily(ts_code=code, start_date="20200101", end_date=today_cn().strftime("%Y%m%d"))
         except Exception:
             continue
         if frame is None or frame.empty:
             continue
-        recent = frame.sort_values("trade_date", ascending=False).head(60)
-        ranges[code] = f"近60交易日区间 {float(recent['low'].min()):.2f}-{float(recent['high'].max()):.2f}"
+        try:
+            row = frame.sort_values("trade_date", ascending=False).iloc[0]
+            quotes[code] = f"收盘 {float(row.get('close')):.2f}"
+            quote_dates[code] = str(row.get("trade_date", ""))
+        except Exception:
+            continue
+
+    pe_ttm: dict[str, float] = {}
+    for code in wanted:
+        try:
+            frame = pro.daily_basic(ts_code=code, trade_date=quote_dates.get(code, ""), fields="ts_code,trade_date,pe_ttm")
+        except Exception:
+            continue
+        if frame is None or frame.empty:
+            continue
+        try:
+            value = float(frame.iloc[0].get("pe_ttm"))
+        except Exception:
+            continue
+        if value > 0:
+            pe_ttm[code] = value
+
+    growth: dict[str, float] = {}
+    for code in wanted:
+        try:
+            frame = pro.fina_indicator(ts_code=code, fields="ts_code,end_date,netprofit_yoy")
+        except Exception:
+            continue
+        if frame is None or frame.empty:
+            continue
+        frame = frame.sort_values("end_date", ascending=False)
+        for _, row in frame.iterrows():
+            try:
+                value = float(row.get("netprofit_yoy"))
+            except Exception:
+                continue
+            if value > 0:
+                growth[code] = value
+                break
 
     out = {}
     for c in candidates:
         q = quotes.get(c.ts_code, "行情待复核")
-        r = ranges.get(c.ts_code)
-        out[c.ts_code] = f"{q}；{r}" if r else q
+        pe = pe_ttm.get(c.ts_code)
+        yoy = growth.get(c.ts_code)
+        peg = f"PEG {pe / yoy:.2f}" if pe and yoy else "PEG 待复核"
+        out[c.ts_code] = f"{q}；{peg}"
     return out
 
 
@@ -305,7 +338,7 @@ def render_html(rows: list[list[str]], signals: list[dict[str, str]]) -> str:
   <ol>
     <li>巨潮资讯和交易所公告：重大合同、中标、产能扩建、调研纪要和风险提示。</li>
     <li>国网/南网、地方低空经济平台、数据中心项目招投标。</li>
-    <li>Tushare/交易所行情：收盘价、成交额和近 60 交易日区间。</li>
+    <li>Tushare/交易所行情：收盘价和 PEG 比率；不展示日期、成交额或近 60 交易日区间。</li>
     <li>公司级收入结构：AI、机器人、低空、先进封装等业务真实占比。</li>
   </ol>
   <h2>简明结论</h2>
