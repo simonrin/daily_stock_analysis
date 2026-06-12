@@ -11,6 +11,7 @@ import html
 import json
 import mimetypes
 import os
+import re
 import smtplib
 import ssl
 import urllib.parse
@@ -97,6 +98,16 @@ def getenv(name: str, default: str = "") -> str:
 
 def today_cn() -> date:
     return datetime.now(timezone(timedelta(hours=8))).date()
+
+
+def stock_code_digits(value: object) -> str:
+    match = re.search(r"\b(\d{6})(?:\.(?:SH|SZ))?\b", str(value or "").upper())
+    return match.group(1) if match else ""
+
+
+def ths_stock_url(value: object) -> str:
+    digits = stock_code_digits(value)
+    return f"https://stockpage.10jqka.com.cn/{digits}/" if digits else ""
 
 
 def trade_dates(days_back: int = 45) -> Iterable[str]:
@@ -275,6 +286,12 @@ def write_xlsx(path: Path, rows: list[list[str]]) -> None:
     for cell in ws[2]:
         cell.font = Font(bold=True)
         cell.fill = header_fill
+    for row_idx in range(3, ws.max_row + 1):
+        cell = ws.cell(row=row_idx, column=2)
+        url = ths_stock_url(cell.value)
+        if url:
+            cell.hyperlink = url
+            cell.font = Font(color="0563C1", underline="single")
     ws.freeze_panes = "A3"
     ws.auto_filter.ref = f"A2:{get_column_letter(len(HEADERS))}{ws.max_row}"
     widths = [30, 20, 30, 34, 28, 24, 32]
@@ -301,7 +318,14 @@ def html_table(rows: list[list[str]]) -> str:
     header = "".join(f"<th>{html.escape(h)}</th>" for h in HEADERS)
     body = []
     for row in rows:
-        body.append("<tr>" + "".join(f"<td>{html.escape(str(cell))}</td>" for cell in row) + "</tr>")
+        cells = []
+        for idx, cell in enumerate(row):
+            value = html.escape(str(cell))
+            url = ths_stock_url(cell) if idx == 1 else ""
+            if url:
+                value = f"<a href=\"{html.escape(url)}\">{value}</a>"
+            cells.append(f"<td>{value}</td>")
+        body.append("<tr>" + "".join(cells) + "</tr>")
     return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
 
