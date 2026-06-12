@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, Font
 
 
 TOKEN_KEYS = (
@@ -64,6 +64,16 @@ def normalize_ts_code(value: object) -> str:
     if digits.startswith(("600", "601", "603", "605", "688")):
         return f"{digits}.SH"
     return f"{digits}.SZ"
+
+
+def stock_code_digits(value: object) -> str:
+    match = re.search(r"\b(\d{6})(?:\.(?:SH|SZ))?\b", str(value or "").upper())
+    return match.group(1) if match else ""
+
+
+def ths_stock_url(value: object) -> str:
+    digits = stock_code_digits(value)
+    return f"https://stockpage.10jqka.com.cn/{digits}/" if digits else ""
 
 
 def trade_dates(days_back: int = 45) -> Iterable[str]:
@@ -198,7 +208,14 @@ def render_html_table(headers: list[str], rows: list[list[str]]) -> str:
     thead = "".join(f"<th>{html.escape(value)}</th>" for value in headers)
     tbody = []
     for row in rows:
-        tbody.append("<tr>" + "".join(f"<td>{html.escape(value)}</td>" for value in row) + "</tr>")
+        cells = []
+        for idx, value in enumerate(row):
+            cell = html.escape(value)
+            url = ths_stock_url(value) if idx == 1 else ""
+            if url:
+                cell = f"<a href=\"{html.escape(url)}\">{cell}</a>"
+            cells.append(f"<td>{cell}</td>")
+        tbody.append("<tr>" + "".join(cells) + "</tr>")
     return f"<table><thead><tr>{thead}</tr></thead><tbody>{''.join(tbody)}</tbody></table>"
 
 
@@ -250,6 +267,9 @@ def main() -> None:
         code = normalize_ts_code(ws.cell(row=row_idx, column=code_col).value)
         if code:
             codes_by_row[row_idx] = code
+            link_cell = ws.cell(row=row_idx, column=code_col)
+            link_cell.hyperlink = ths_stock_url(code)
+            link_cell.font = Font(color="0563C1", underline="single")
     ws.cell(row=2, column=quote_col).value = "行情/PEG"
     for row_idx in range(3, ws.max_row + 1):
         cell = ws.cell(row=row_idx, column=1)
