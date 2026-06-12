@@ -1,0 +1,56 @@
+name: A-Share Supply Chain Bottleneck Weekly
+
+on:
+  schedule:
+    # Sunday 08:30 Asia/Shanghai == Sunday 00:30 UTC.
+    - cron: "30 0 * * 0"
+  workflow_dispatch:
+
+jobs:
+  weekly-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    env:
+      ASTOCKANA_REPORT_RECIPIENT: ${{ secrets.ASTOCKANA_REPORT_RECIPIENT }}
+      ASTOCKANA_SMTP_HOST: ${{ secrets.ASTOCKANA_SMTP_HOST }}
+      ASTOCKANA_SMTP_PORT: ${{ secrets.ASTOCKANA_SMTP_PORT }}
+      ASTOCKANA_SMTP_USER: ${{ secrets.ASTOCKANA_SMTP_USER }}
+      ASTOCKANA_SMTP_AUTH_CODE: ${{ secrets.ASTOCKANA_SMTP_AUTH_CODE }}
+      ASTOCKANA_MAIL_FROM_NAME: ${{ vars.ASTOCKANA_MAIL_FROM_NAME || 'A-Share Supply Chain Weekly' }}
+      ASTOCKANA_MAIL_SUBJECT_PREFIX: ${{ vars.ASTOCKANA_MAIL_SUBJECT_PREFIX || 'A-Share Supply Chain Bottleneck Weekly' }}
+      ASTOCKANA_TUSHARE_TOKEN: ${{ secrets.ASTOCKANA_TUSHARE_TOKEN }}
+      ASTOCKANA_DISABLE_EMAIL: ${{ vars.ASTOCKANA_DISABLE_EMAIL || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-bottleneck.txt
+
+      - name: Install bottleneck report dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-bottleneck.txt
+
+      - name: Generate and send weekly bottleneck report
+        run: python scripts/a_share_supply_chain_bottleneck.py
+
+      - name: Upload generated report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a-share-supply-chain-bottleneck-report
+          path: |
+            reports/a-share-supply-chain-bottleneck-*.html
+            reports/a-share-supply-chain-bottleneck-*.txt
+            reports/a-share-supply-chain-bottleneck-*.doc
+            reports/a-share-supply-chain-bottleneck-*.xlsx
+          if-no-files-found: warn
