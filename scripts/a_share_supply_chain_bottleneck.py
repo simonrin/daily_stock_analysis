@@ -269,7 +269,7 @@ def write_xlsx(path: Path, rows: list[list[str]]) -> None:
     )
     for row in ws.iter_rows():
         for cell in row:
-            wrap_text = not (cell.column == 3 and cell.row >= 3)
+            wrap_text = not (cell.column in (3, 7) and cell.row >= 2)
             cell.alignment = Alignment(wrap_text=wrap_text, vertical="top")
             cell.border = border
     for cell in ws[2]:
