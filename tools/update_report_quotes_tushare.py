@@ -168,6 +168,22 @@ def locate_columns(ws) -> tuple[int, int]:
     return code_col, quote_col
 
 
+def normalize_layer_cell(value: object) -> str:
+    text = str(value or "")
+    colon = chr(0xFF1A)
+    semi = chr(0xFF1B)
+    if semi in text:
+        left, right = text.split(semi, 1)
+        if colon in left:
+            left = left.split(colon, 1)[1]
+        if colon in right:
+            right = right.split(colon, 1)[1]
+        return f"{left}/{right}"
+    if colon in text:
+        return text.split(colon, 1)[1]
+    return text
+
+
 def worksheet_rows(ws) -> tuple[list[str], list[list[str]]]:
     headers = [str(ws.cell(row=2, column=col_idx).value or "") for col_idx in range(1, ws.max_column + 1)]
     rows: list[list[str]] = []
@@ -235,6 +251,9 @@ def main() -> None:
         if code:
             codes_by_row[row_idx] = code
     ws.cell(row=2, column=quote_col).value = "行情/PEG"
+    for row_idx in range(3, ws.max_row + 1):
+        cell = ws.cell(row=row_idx, column=1)
+        cell.value = normalize_layer_cell(cell.value)
     for col_idx in (3, 7):
         for row_idx in range(2, ws.max_row + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
