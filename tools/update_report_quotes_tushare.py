@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl import load_workbook
+from openpyxl.styles import Alignment
 
 
 TOKEN_KEYS = (
@@ -234,6 +235,16 @@ def main() -> None:
         if code:
             codes_by_row[row_idx] = code
     ws.cell(row=2, column=quote_col).value = "行情/PEG"
+    for row_idx in range(3, ws.max_row + 1):
+        cell = ws.cell(row=row_idx, column=3)
+        cell.alignment = Alignment(
+            horizontal=cell.alignment.horizontal,
+            vertical=cell.alignment.vertical or "top",
+            text_rotation=cell.alignment.text_rotation,
+            wrap_text=False,
+            shrink_to_fit=cell.alignment.shrink_to_fit,
+            indent=cell.alignment.indent,
+        )
 
     token = find_token(Path(args.env))
     if token:
