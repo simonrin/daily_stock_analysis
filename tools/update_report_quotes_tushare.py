@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Update report market cells from Tushare.
 
-The quote column intentionally omits trade date, turnover amount, pct change,
-and 60-day price ranges. It shows only latest close and PEG when available.
+The quote column intentionally omits trade date, turnover amount, and 60-day
+price ranges. It shows latest close, monthly pct change, PEG, DCF intrinsic
+value, and an industry-average DCF comparison when available.
 """
 
 from __future__ import annotations
@@ -82,59 +83,63 @@ def trade_dates(days_back: int = 45) -> Iterable[str]:
         yield (today - timedelta(days=offset)).strftime("%Y%m%d")
 
 
-def fetch_closes(ts_codes: list[str], token: str) -> tuple[dict[str, str], dict[str, str]]:
+def format_pct(value: float | None) -> str:
+    return "待复核" if value is None else f"{value:+.1f}%"
+
+
+def dcf_intrinsic_value_per_share(fcf: float, shares: float, growth_pct: float | None) -> float | None:
+    if fcf <= 0 or shares <= 0:
+        return None
+    discount_rate = 0.10
+    terminal_growth = 0.025
+    growth_rate = 0.02 if growth_pct is None else max(0.02, min(growth_pct / 100, 0.25))
+    present_value = 0.0
+    projected_fcf = fcf
+    for year in range(1, 6):
+        projected_fcf *= 1 + growth_rate
+        present_value += projected_fcf / ((1 + discount_rate) ** year)
+    terminal_value = projected_fcf * (1 + terminal_growth) / (discount_rate - terminal_growth)
+    present_value += terminal_value / ((1 + discount_rate) ** 5)
+    return present_value / shares
+
+
+def fetch_market_valuations(ts_codes: list[str], token: str) -> dict[str, str]:
     import tushare as ts
 
     pro = ts.pro_api(token)
-    wanted = set(ts_codes)
-    closes: dict[str, str] = {}
+    wanted = list(dict.fromkeys(ts_codes))
+    closes: dict[str, float] = {}
+    month_changes: dict[str, float] = {}
     quote_dates: dict[str, str] = {}
 
-    for trade_date in trade_dates():
+    end = date.today()
+    start = end - timedelta(days=120)
+    for code in wanted:
         try:
-            frame = pro.daily(trade_date=trade_date)
-        except Exception:
-            continue
-        if frame is None or frame.empty:
-            continue
-        for _, row in frame.iterrows():
-            code = str(row.get("ts_code", ""))
-            if code not in wanted or code in closes:
-                continue
-            try:
-                closes[code] = f"收盘 {float(row.get('close')):.2f}"
-                quote_dates[code] = trade_date
-            except Exception:
-                continue
-        if wanted.issubset(closes):
-            break
-
-    for code in wanted - set(closes):
-        try:
-            frame = pro.daily(ts_code=code, start_date="20200101", end_date=date.today().strftime("%Y%m%d"))
+            frame = pro.daily(ts_code=code, start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"))
         except Exception:
             continue
         if frame is None or frame.empty:
             continue
         try:
             row = frame.sort_values("trade_date", ascending=False).iloc[0]
-            closes[code] = f"收盘 {float(row.get('close')):.2f}"
+            closes[code] = float(row.get("close"))
             quote_dates[code] = str(row.get("trade_date", ""))
+            recent = frame.sort_values("trade_date", ascending=False).reset_index(drop=True)
+            if len(recent) > 20:
+                prev_close = float(recent.iloc[20].get("close"))
+                if prev_close > 0:
+                    month_changes[code] = (closes[code] / prev_close - 1) * 100
         except Exception:
             continue
-    return closes, quote_dates
 
-
-def fetch_peg_ratios(ts_codes: list[str], token: str, quote_dates: dict[str, str]) -> dict[str, str]:
-    import tushare as ts
-
-    pro = ts.pro_api(token)
     pe_ttm: dict[str, float] = {}
+    total_shares: dict[str, float] = {}
     growth: dict[str, float] = {}
 
-    for code in ts_codes:
+    for code in wanted:
         try:
-            frame = pro.daily_basic(ts_code=code, trade_date=quote_dates.get(code, ""), fields="ts_code,trade_date,pe_ttm")
+            frame = pro.daily_basic(ts_code=code, trade_date=quote_dates.get(code, ""), fields="ts_code,trade_date,pe_ttm,total_share")
         except Exception:
             continue
         if frame is None or frame.empty:
@@ -142,11 +147,17 @@ def fetch_peg_ratios(ts_codes: list[str], token: str, quote_dates: dict[str, str
         try:
             value = float(frame.iloc[0].get("pe_ttm"))
         except Exception:
-            continue
+            value = 0.0
+        try:
+            share_value = float(frame.iloc[0].get("total_share")) * 10000
+        except Exception:
+            share_value = 0.0
         if value > 0:
             pe_ttm[code] = value
+        if share_value > 0:
+            total_shares[code] = share_value
 
-    for code in ts_codes:
+    for code in wanted:
         try:
             frame = pro.fina_indicator(ts_code=code, fields="ts_code,end_date,netprofit_yoy")
         except Exception:
@@ -163,18 +174,76 @@ def fetch_peg_ratios(ts_codes: list[str], token: str, quote_dates: dict[str, str
                 growth[code] = value
                 break
 
-    peg: dict[str, str] = {}
-    for code in ts_codes:
+    industries: dict[str, str] = {}
+    try:
+        frame = pro.stock_basic(exchange="", list_status="L", fields="ts_code,industry")
+        if frame is not None and not frame.empty:
+            industries = {str(row.get("ts_code")): str(row.get("industry") or "") for _, row in frame.iterrows()}
+    except Exception:
+        industries = {}
+
+    dcf_values: dict[str, float] = {}
+    dcf_gaps: dict[str, float] = {}
+    for code in wanted:
+        try:
+            frame = pro.cashflow(ts_code=code, fields="ts_code,end_date,free_cashflow,n_cashflow_act,net_cash_flows_oper_act,c_pay_acq_const_fiolta")
+        except Exception:
+            continue
+        if frame is None or frame.empty:
+            continue
+        frame = frame.sort_values("end_date", ascending=False)
+        annual = frame[frame["end_date"].astype(str).str.endswith("1231")] if "end_date" in frame.columns else frame
+        if annual is not None and not annual.empty:
+            frame = annual
+        fcf = None
+        for _, row in frame.iterrows():
+            try:
+                free_cashflow = row.get("free_cashflow")
+                if free_cashflow is not None and str(free_cashflow) != "nan":
+                    fcf = float(free_cashflow)
+                else:
+                    cfo = float(row.get("n_cashflow_act") or row.get("net_cash_flows_oper_act"))
+                    capex = abs(float(row.get("c_pay_acq_const_fiolta") or 0))
+                    fcf = cfo - capex
+            except Exception:
+                continue
+            break
+        intrinsic = dcf_intrinsic_value_per_share(fcf or 0, total_shares.get(code, 0), growth.get(code))
+        if intrinsic and intrinsic > 0:
+            dcf_values[code] = intrinsic
+            if closes.get(code):
+                dcf_gaps[code] = (intrinsic / closes[code] - 1) * 100
+
+    industry_gap_values: dict[str, list[float]] = {}
+    for code, gap in dcf_gaps.items():
+        industry = industries.get(code) or "未分类"
+        industry_gap_values.setdefault(industry, []).append(gap)
+    industry_gap_avg = {industry: sum(values) / len(values) for industry, values in industry_gap_values.items()}
+
+    market: dict[str, str] = {}
+    for code in wanted:
+        close = closes.get(code)
+        quote = f"收盘 {close:.2f}，月涨跌幅 {format_pct(month_changes.get(code))}" if close else "行情待复核"
         pe = pe_ttm.get(code)
         yoy = growth.get(code)
-        peg[code] = f"PEG {pe / yoy:.2f}" if pe and yoy else "PEG 待复核"
-    return peg
+        peg = f"PEG {pe / yoy:.2f}" if pe and yoy else "PEG 待复核"
+        dcf = dcf_values.get(code)
+        gap = dcf_gaps.get(code)
+        industry = industries.get(code) or "未分类"
+        avg_gap = industry_gap_avg.get(industry)
+        dcf_text = (
+            f"DCF内在价值 {dcf:.2f}/股，较现价 {format_pct(gap)}；行业均值 {format_pct(avg_gap)}"
+            if dcf
+            else "DCF内在价值待复核；行业均值待复核"
+        )
+        market[code] = f"{quote}；{peg}；{dcf_text}"
+    return market
 
 
 def locate_columns(ws) -> tuple[int, int]:
     header_values = [str(ws.cell(row=2, column=col_idx).value or "") for col_idx in range(1, ws.max_column + 1)]
     code_col = next((idx + 1 for idx, value in enumerate(header_values) if "股票代码" in value or "公司/股票代码" in value), 2)
-    quote_col = next((idx + 1 for idx, value in enumerate(header_values) if "行情" in value or "PEG" in value), 5)
+    quote_col = next((idx + 1 for idx, value in enumerate(header_values) if "行情" in value or "PEG" in value or "估值" in value), 5)
     return code_col, quote_col
 
 
@@ -227,11 +296,14 @@ def update_sidecar(path: Path, headers: list[str], rows: list[list[str]]) -> Non
     if not path.exists():
         return
     text = path.read_text(encoding="utf-8")
-    text = text.replace("行情区间", "行情/PEG")
-    text = text.replace("行情（Tushare）", "行情/PEG")
-    text = text.replace("行情/价格区间", "行情/PEG")
-    text = text.replace("东方财富/交易所行情：表格候选公司的最新价、涨跌幅、成交额和估值分位。", "Tushare/交易所行情：表格候选公司的收盘价和 PEG 比率。")
-    text = text.replace("Tushare/交易所行情：收盘价、成交额和近 60 交易日区间。", "Tushare/交易所行情：收盘价和 PEG 比率；不展示日期、成交额或近 60 交易日区间。")
+    text = text.replace("行情区间", "行情/估值")
+    text = text.replace("行情/PEG", "行情/估值")
+    text = text.replace("行情（Tushare）", "行情/估值")
+    text = text.replace("行情/价格区间", "行情/估值")
+    text = text.replace("东方财富/交易所行情：表格候选公司的最新价、涨跌幅、成交额和估值分位。", "Tushare/交易所行情与估值：收盘价、月涨跌幅、PEG、DCF 内在价值和行业均值对比。")
+    text = text.replace("Tushare/交易所行情：表格候选公司的收盘价和 PEG 比率。", "Tushare/交易所行情与估值：收盘价、月涨跌幅、PEG、DCF 内在价值和行业均值对比。")
+    text = text.replace("Tushare/交易所行情：收盘价和 PEG 比率；不展示日期、成交额或近 60 交易日区间。", "Tushare/交易所行情与估值：收盘价、月涨跌幅、PEG、DCF 内在价值和行业均值对比。")
+    text = text.replace("Tushare/交易所行情：收盘价、成交额和近 60 交易日区间。", "Tushare/交易所行情与估值：收盘价、月涨跌幅、PEG、DCF 内在价值和行业均值对比。")
     if path.suffix.lower() in {".html", ".htm"}:
         table = render_html_table(headers, rows)
         text = re.sub(r"<table>.*?</table>", table, text, count=1, flags=re.S)
@@ -241,16 +313,20 @@ def update_sidecar(path: Path, headers: list[str], rows: list[list[str]]) -> Non
         start = text.find(marker)
         if start >= 0:
             table_start = text.find("\n", start)
-            next_section = text.find("\n\n过去", table_start)
-            if next_section < 0:
-                next_section = text.find("\n\n本文", table_start)
+            next_markers = [
+                position
+                for marker_text in ("\n\n过去", "\n\n需要", "\n\n本文")
+                for position in [text.find(marker_text, table_start)]
+                if position >= 0
+            ]
+            next_section = min(next_markers) if next_markers else len(text)
             if table_start >= 0 and next_section >= 0:
                 text = text[:table_start + 1] + table + text[next_section:]
     path.write_text(text, encoding="utf-8")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Update workbook quote/PEG cells from Tushare.")
+    parser = argparse.ArgumentParser(description="Update workbook market/valuation cells from Tushare.")
     parser.add_argument("--workbook", required=True, help="Path to xlsx workbook.")
     parser.add_argument("--html", default=None, help="Optional HTML file to sync.")
     parser.add_argument("--txt", default=None, help="Optional text file to sync.")
@@ -270,7 +346,7 @@ def main() -> None:
             link_cell = ws.cell(row=row_idx, column=code_col)
             link_cell.hyperlink = ths_stock_url(code)
             link_cell.font = Font(color="0563C1", underline="single")
-    ws.cell(row=2, column=quote_col).value = "行情/PEG"
+    ws.cell(row=2, column=quote_col).value = "行情/估值"
     for row_idx in range(3, ws.max_row + 1):
         cell = ws.cell(row=row_idx, column=1)
         cell.value = normalize_layer_cell(cell.value)
@@ -288,19 +364,17 @@ def main() -> None:
 
     token = find_token(Path(args.env))
     if token:
-        closes, quote_dates = fetch_closes(list(codes_by_row.values()), token)
-        pegs = fetch_peg_ratios(list(codes_by_row.values()), token, quote_dates)
+        valuations = fetch_market_valuations(list(codes_by_row.values()), token)
         missing_text = "行情待复核"
-        status = "TUSHARE_QUOTE_PEG_UPDATED"
+        status = "TUSHARE_MARKET_VALUATION_UPDATED"
     else:
-        closes = {}
-        pegs = {}
+        valuations = {}
         missing_text = "行情待复核"
         status = "TUSHARE_TOKEN_MISSING"
 
     quote_by_code: dict[str, str] = {}
     for row_idx, code in codes_by_row.items():
-        value = f"{closes.get(code, missing_text)}；{pegs.get(code, 'PEG 待复核')}"
+        value = valuations.get(code, f"{missing_text}；PEG 待复核；DCF内在价值待复核；行业均值待复核")
         ws.cell(row=row_idx, column=quote_col).value = value
         quote_by_code[code] = value
 
