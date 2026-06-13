@@ -35,7 +35,7 @@ HEADERS = [
     "公司/股票代码",
     "排序原因",
     "一周新增证据",
-    "行情/PEG",
+    "行情/估值",
     "主要风险",
     "待验证事实/研究优先级",
 ]
@@ -116,6 +116,26 @@ def trade_dates(days_back: int = 45) -> Iterable[str]:
         yield (current - timedelta(days=offset)).strftime("%Y%m%d")
 
 
+def format_pct(value: float | None) -> str:
+    return "待复核" if value is None else f"{value:+.1f}%"
+
+
+def dcf_intrinsic_value_per_share(fcf: float, shares: float, growth_pct: float | None) -> float | None:
+    if fcf <= 0 or shares <= 0:
+        return None
+    discount_rate = 0.10
+    terminal_growth = 0.025
+    growth_rate = 0.02 if growth_pct is None else max(0.02, min(growth_pct / 100, 0.25))
+    present_value = 0.0
+    projected_fcf = fcf
+    for year in range(1, 6):
+        projected_fcf *= 1 + growth_rate
+        present_value += projected_fcf / ((1 + discount_rate) ** year)
+    terminal_value = projected_fcf * (1 + terminal_growth) / (discount_rate - terminal_growth)
+    present_value += terminal_value / ((1 + discount_rate) ** 5)
+    return present_value / shares
+
+
 def fetch_quotes(candidates: list[Candidate]) -> dict[str, str]:
     token = getenv("ASTOCKANA_TUSHARE_TOKEN") or getenv("TUSHARE_TOKEN")
     if not token:
@@ -127,55 +147,51 @@ def fetch_quotes(candidates: list[Candidate]) -> dict[str, str]:
         return {c.ts_code: "行情待复核" for c in candidates}
 
     pro = ts.pro_api(token)
-    wanted = {c.ts_code for c in candidates}
-    quotes: dict[str, str] = {}
+    wanted = [c.ts_code for c in candidates]
+    wanted_set = set(wanted)
+    closes: dict[str, float] = {}
+    month_changes: dict[str, float] = {}
     quote_dates: dict[str, str] = {}
 
-    for trade_date in trade_dates():
+    end = today_cn()
+    start = end - timedelta(days=120)
+    for code in wanted:
         try:
-            frame = pro.daily(trade_date=trade_date)
-        except Exception:
-            continue
-        if frame is None or frame.empty:
-            continue
-        for _, row in frame.iterrows():
-            code = str(row.get("ts_code", ""))
-            if code not in wanted or code in quotes:
-                continue
-            close = float(row.get("close"))
-            quotes[code] = f"收盘 {close:.2f}"
-            quote_dates[code] = trade_date
-        if wanted.issubset(quotes):
-            break
-
-    for code in wanted - set(quotes):
-        try:
-            frame = pro.daily(ts_code=code, start_date="20200101", end_date=today_cn().strftime("%Y%m%d"))
+            frame = pro.daily(ts_code=code, start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"))
         except Exception:
             continue
         if frame is None or frame.empty:
             continue
         try:
             row = frame.sort_values("trade_date", ascending=False).iloc[0]
-            quotes[code] = f"收盘 {float(row.get('close')):.2f}"
+            closes[code] = float(row.get("close"))
             quote_dates[code] = str(row.get("trade_date", ""))
+            recent = frame.sort_values("trade_date", ascending=False).reset_index(drop=True)
+            if len(recent) > 20:
+                prev_close = float(recent.iloc[20].get("close"))
+                if prev_close > 0:
+                    month_changes[code] = (closes[code] / prev_close - 1) * 100
         except Exception:
             continue
 
     pe_ttm: dict[str, float] = {}
+    total_shares: dict[str, float] = {}
     for code in wanted:
         try:
-            frame = pro.daily_basic(ts_code=code, trade_date=quote_dates.get(code, ""), fields="ts_code,trade_date,pe_ttm")
+            frame = pro.daily_basic(ts_code=code, trade_date=quote_dates.get(code, ""), fields="ts_code,trade_date,pe_ttm,total_share")
         except Exception:
             continue
         if frame is None or frame.empty:
             continue
         try:
             value = float(frame.iloc[0].get("pe_ttm"))
+            share_value = float(frame.iloc[0].get("total_share")) * 10000
         except Exception:
-            continue
+            share_value = 0.0
         if value > 0:
             pe_ttm[code] = value
+        if share_value > 0:
+            total_shares[code] = share_value
 
     growth: dict[str, float] = {}
     for code in wanted:
@@ -195,13 +211,69 @@ def fetch_quotes(candidates: list[Candidate]) -> dict[str, str]:
                 growth[code] = value
                 break
 
+    industries: dict[str, str] = {}
+    try:
+        frame = pro.stock_basic(exchange="", list_status="L", fields="ts_code,industry")
+        if frame is not None and not frame.empty:
+            industries = {str(row.get("ts_code")): str(row.get("industry") or "") for _, row in frame.iterrows()}
+    except Exception:
+        industries = {}
+
+    dcf_values: dict[str, float] = {}
+    dcf_gaps: dict[str, float] = {}
+    for code in wanted:
+        try:
+            frame = pro.cashflow(ts_code=code, fields="ts_code,end_date,free_cashflow,n_cashflow_act,net_cash_flows_oper_act,c_pay_acq_const_fiolta")
+        except Exception:
+            continue
+        if frame is None or frame.empty:
+            continue
+        frame = frame.sort_values("end_date", ascending=False)
+        annual = frame[frame["end_date"].astype(str).str.endswith("1231")] if "end_date" in frame.columns else frame
+        if annual is not None and not annual.empty:
+            frame = annual
+        fcf = None
+        for _, row in frame.iterrows():
+            try:
+                free_cashflow = row.get("free_cashflow")
+                if free_cashflow is not None and str(free_cashflow) != "nan":
+                    fcf = float(free_cashflow)
+                else:
+                    cfo = float(row.get("n_cashflow_act") or row.get("net_cash_flows_oper_act"))
+                    capex = abs(float(row.get("c_pay_acq_const_fiolta") or 0))
+                    fcf = cfo - capex
+            except Exception:
+                continue
+            break
+        intrinsic = dcf_intrinsic_value_per_share(fcf or 0, total_shares.get(code, 0), growth.get(code))
+        if intrinsic and intrinsic > 0:
+            dcf_values[code] = intrinsic
+            if closes.get(code):
+                dcf_gaps[code] = (intrinsic / closes[code] - 1) * 100
+
+    industry_gap_values: dict[str, list[float]] = {}
+    for code, gap in dcf_gaps.items():
+        industry = industries.get(code) or "未分类"
+        industry_gap_values.setdefault(industry, []).append(gap)
+    industry_gap_avg = {industry: sum(values) / len(values) for industry, values in industry_gap_values.items()}
+
     out = {}
     for c in candidates:
-        q = quotes.get(c.ts_code, "行情待复核")
+        close = closes.get(c.ts_code)
+        q = f"收盘 {close:.2f}，月涨跌幅 {format_pct(month_changes.get(c.ts_code))}" if close else "行情待复核"
         pe = pe_ttm.get(c.ts_code)
         yoy = growth.get(c.ts_code)
         peg = f"PEG {pe / yoy:.2f}" if pe and yoy else "PEG 待复核"
-        out[c.ts_code] = f"{q}；{peg}"
+        dcf = dcf_values.get(c.ts_code)
+        gap = dcf_gaps.get(c.ts_code)
+        industry = industries.get(c.ts_code) or "未分类"
+        avg_gap = industry_gap_avg.get(industry)
+        dcf_text = (
+            f"DCF内在价值 {dcf:.2f}/股，较现价 {format_pct(gap)}；行业均值 {format_pct(avg_gap)}"
+            if dcf
+            else "DCF内在价值待复核；行业均值待复核"
+        )
+        out[c.ts_code] = f"{q}；{peg}；{dcf_text}"
     return out
 
 
@@ -363,7 +435,7 @@ def render_html(rows: list[list[str]], signals: list[dict[str, str]]) -> str:
   <ol>
     <li>巨潮资讯和交易所公告：重大合同、中标、产能扩建、调研纪要和风险提示。</li>
     <li>国网/南网、地方低空经济平台、数据中心项目招投标。</li>
-    <li>Tushare/交易所行情：收盘价和 PEG 比率；不展示日期、成交额或近 60 交易日区间。</li>
+    <li>Tushare/交易所行情与估值：收盘价、月涨跌幅、PEG、DCF 内在价值和行业均值对比。</li>
     <li>公司级收入结构：AI、机器人、低空、先进封装等业务真实占比。</li>
   </ol>
   <h2>简明结论</h2>
