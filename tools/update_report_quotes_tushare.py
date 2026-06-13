@@ -2,8 +2,7 @@
 """Update report market cells from Tushare.
 
 The quote column intentionally omits trade date, turnover amount, and 60-day
-price ranges. It shows latest close, monthly pct change, PEG, DCF intrinsic
-value, and an industry-average DCF comparison when available.
+price ranges. It shows latest close, monthly pct change, and PEG when available.
 """
 
 from __future__ import annotations
@@ -87,22 +86,6 @@ def format_pct(value: float | None) -> str:
     return "待复核" if value is None else f"{value:+.1f}%"
 
 
-def dcf_intrinsic_value_per_share(fcf: float, shares: float, growth_pct: float | None) -> float | None:
-    if fcf <= 0 or shares <= 0:
-        return None
-    discount_rate = 0.10
-    terminal_growth = 0.025
-    growth_rate = 0.02 if growth_pct is None else max(0.02, min(growth_pct / 100, 0.25))
-    present_value = 0.0
-    projected_fcf = fcf
-    for year in range(1, 6):
-        projected_fcf *= 1 + growth_rate
-        present_value += projected_fcf / ((1 + discount_rate) ** year)
-    terminal_value = projected_fcf * (1 + terminal_growth) / (discount_rate - terminal_growth)
-    present_value += terminal_value / ((1 + discount_rate) ** 5)
-    return present_value / shares
-
-
 def fetch_market_valuations(ts_codes: list[str], token: str) -> dict[str, str]:
     import tushare as ts
 
@@ -134,12 +117,11 @@ def fetch_market_valuations(ts_codes: list[str], token: str) -> dict[str, str]:
             continue
 
     pe_ttm: dict[str, float] = {}
-    total_shares: dict[str, float] = {}
     growth: dict[str, float] = {}
 
     for code in wanted:
         try:
-            frame = pro.daily_basic(ts_code=code, trade_date=quote_dates.get(code, ""), fields="ts_code,trade_date,pe_ttm,total_share")
+            frame = pro.daily_basic(ts_code=code, trade_date=quote_dates.get(code, ""), fields="ts_code,trade_date,pe_ttm")
         except Exception:
             continue
         if frame is None or frame.empty:
@@ -148,14 +130,8 @@ def fetch_market_valuations(ts_codes: list[str], token: str) -> dict[str, str]:
             value = float(frame.iloc[0].get("pe_ttm"))
         except Exception:
             value = 0.0
-        try:
-            share_value = float(frame.iloc[0].get("total_share")) * 10000
-        except Exception:
-            share_value = 0.0
         if value > 0:
             pe_ttm[code] = value
-        if share_value > 0:
-            total_shares[code] = share_value
 
     for code in wanted:
         try:
@@ -174,52 +150,6 @@ def fetch_market_valuations(ts_codes: list[str], token: str) -> dict[str, str]:
                 growth[code] = value
                 break
 
-    industries: dict[str, str] = {}
-    try:
-        frame = pro.stock_basic(exchange="", list_status="L", fields="ts_code,industry")
-        if frame is not None and not frame.empty:
-            industries = {str(row.get("ts_code")): str(row.get("industry") or "") for _, row in frame.iterrows()}
-    except Exception:
-        industries = {}
-
-    dcf_values: dict[str, float] = {}
-    dcf_gaps: dict[str, float] = {}
-    for code in wanted:
-        try:
-            frame = pro.cashflow(ts_code=code, fields="ts_code,end_date,free_cashflow,n_cashflow_act,net_cash_flows_oper_act,c_pay_acq_const_fiolta")
-        except Exception:
-            continue
-        if frame is None or frame.empty:
-            continue
-        frame = frame.sort_values("end_date", ascending=False)
-        annual = frame[frame["end_date"].astype(str).str.endswith("1231")] if "end_date" in frame.columns else frame
-        if annual is not None and not annual.empty:
-            frame = annual
-        fcf = None
-        for _, row in frame.iterrows():
-            try:
-                free_cashflow = row.get("free_cashflow")
-                if free_cashflow is not None and str(free_cashflow) != "nan":
-                    fcf = float(free_cashflow)
-                else:
-                    cfo = float(row.get("n_cashflow_act") or row.get("net_cash_flows_oper_act"))
-                    capex = abs(float(row.get("c_pay_acq_const_fiolta") or 0))
-                    fcf = cfo - capex
-            except Exception:
-                continue
-            break
-        intrinsic = dcf_intrinsic_value_per_share(fcf or 0, total_shares.get(code, 0), growth.get(code))
-        if intrinsic and intrinsic > 0:
-            dcf_values[code] = intrinsic
-            if closes.get(code):
-                dcf_gaps[code] = (intrinsic / closes[code] - 1) * 100
-
-    industry_gap_values: dict[str, list[float]] = {}
-    for code, gap in dcf_gaps.items():
-        industry = industries.get(code) or "未分类"
-        industry_gap_values.setdefault(industry, []).append(gap)
-    industry_gap_avg = {industry: sum(values) / len(values) for industry, values in industry_gap_values.items()}
-
     market: dict[str, str] = {}
     for code in wanted:
         close = closes.get(code)
@@ -227,16 +157,7 @@ def fetch_market_valuations(ts_codes: list[str], token: str) -> dict[str, str]:
         pe = pe_ttm.get(code)
         yoy = growth.get(code)
         peg = f"PEG {pe / yoy:.2f}" if pe and yoy else "PEG 待复核"
-        dcf = dcf_values.get(code)
-        gap = dcf_gaps.get(code)
-        industry = industries.get(code) or "未分类"
-        avg_gap = industry_gap_avg.get(industry)
-        dcf_text = (
-            f"DCF内在价值 {dcf:.2f}/股，较现价 {format_pct(gap)}；行业均值 {format_pct(avg_gap)}"
-            if dcf
-            else "DCF内在价值待复核；行业均值待复核"
-        )
-        market[code] = f"{quote}；{peg}；{dcf_text}"
+        market[code] = f"{quote}；{peg}"
     return market
 
 
@@ -296,14 +217,14 @@ def update_sidecar(path: Path, headers: list[str], rows: list[list[str]]) -> Non
     if not path.exists():
         return
     text = path.read_text(encoding="utf-8")
-    text = text.replace("行情区间", "行情/估值")
-    text = text.replace("行情/PEG", "行情/估值")
-    text = text.replace("行情（Tushare）", "行情/估值")
-    text = text.replace("行情/价格区间", "行情/估值")
-    text = text.replace("东方财富/交易所行情：表格候选公司的最新价、涨跌幅、成交额和估值分位。", "Tushare/交易所行情与估值：收盘价、月涨跌幅、PEG、DCF 内在价值和行业均值对比。")
-    text = text.replace("Tushare/交易所行情：表格候选公司的收盘价和 PEG 比率。", "Tushare/交易所行情与估值：收盘价、月涨跌幅、PEG、DCF 内在价值和行业均值对比。")
-    text = text.replace("Tushare/交易所行情：收盘价和 PEG 比率；不展示日期、成交额或近 60 交易日区间。", "Tushare/交易所行情与估值：收盘价、月涨跌幅、PEG、DCF 内在价值和行业均值对比。")
-    text = text.replace("Tushare/交易所行情：收盘价、成交额和近 60 交易日区间。", "Tushare/交易所行情与估值：收盘价、月涨跌幅、PEG、DCF 内在价值和行业均值对比。")
+    text = text.replace("行情区间", "行情/PEG")
+    text = text.replace("行情/估值", "行情/PEG")
+    text = text.replace("行情（Tushare）", "行情/PEG")
+    text = text.replace("行情/价格区间", "行情/PEG")
+    text = text.replace("东方财富/交易所行情：表格候选公司的最新价、涨跌幅、成交额和估值分位。", "Tushare/交易所行情：收盘价、月涨跌幅和 PEG。")
+    text = text.replace("Tushare/交易所行情：表格候选公司的收盘价和 PEG 比率。", "Tushare/交易所行情：收盘价、月涨跌幅和 PEG。")
+    text = text.replace("Tushare/交易所行情：收盘价和 PEG 比率；不展示日期、成交额或近 60 交易日区间。", "Tushare/交易所行情：收盘价、月涨跌幅和 PEG。")
+    text = text.replace("Tushare/交易所行情：收盘价、成交额和近 60 交易日区间。", "Tushare/交易所行情：收盘价、月涨跌幅和 PEG。")
     if path.suffix.lower() in {".html", ".htm"}:
         table = render_html_table(headers, rows)
         text = re.sub(r"<table>.*?</table>", table, text, count=1, flags=re.S)
@@ -326,7 +247,7 @@ def update_sidecar(path: Path, headers: list[str], rows: list[list[str]]) -> Non
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Update workbook market/valuation cells from Tushare.")
+    parser = argparse.ArgumentParser(description="Update workbook quote/PEG cells from Tushare.")
     parser.add_argument("--workbook", required=True, help="Path to xlsx workbook.")
     parser.add_argument("--html", default=None, help="Optional HTML file to sync.")
     parser.add_argument("--txt", default=None, help="Optional text file to sync.")
@@ -346,7 +267,7 @@ def main() -> None:
             link_cell = ws.cell(row=row_idx, column=code_col)
             link_cell.hyperlink = ths_stock_url(code)
             link_cell.font = Font(color="0563C1", underline="single")
-    ws.cell(row=2, column=quote_col).value = "行情/估值"
+    ws.cell(row=2, column=quote_col).value = "行情/PEG"
     for row_idx in range(3, ws.max_row + 1):
         cell = ws.cell(row=row_idx, column=1)
         cell.value = normalize_layer_cell(cell.value)
@@ -374,7 +295,7 @@ def main() -> None:
 
     quote_by_code: dict[str, str] = {}
     for row_idx, code in codes_by_row.items():
-        value = valuations.get(code, f"{missing_text}；PEG 待复核；DCF内在价值待复核；行业均值待复核")
+        value = valuations.get(code, f"{missing_text}；PEG 待复核")
         ws.cell(row=row_idx, column=quote_col).value = value
         quote_by_code[code] = value
 
