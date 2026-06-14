@@ -45,7 +45,9 @@
 
 ## 运行方式
 
-自动运行：GitHub Actions 每周日 00:30 UTC 触发，对应北京时间/上海时间每周日 08:30。
+自动运行：GitHub Actions 每周日 08:37（Asia/Shanghai）触发。时间避开 GitHub Actions 较拥挤的整点/半点，以降低 schedule 被延迟或丢弃的概率。
+
+如果某次 GitHub schedule 漏跑，可以临时修改 workflow 文件并在提交信息中加入 `[send-bottleneck-now]`，push 事件会补发一次；普通脚本/文档更新不会触发补发。
 
 手动触发：进入 `Actions -> A-Share Supply Chain Bottleneck Weekly -> Run workflow`。
 
