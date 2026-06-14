@@ -204,6 +204,8 @@ def render_html_table(headers: list[str], rows: list[list[str]]) -> str:
             url = ths_stock_url(value) if idx == 1 else ""
             if url:
                 cell = f"<a href=\"{html.escape(url)}\">{cell}</a>"
+            if idx in (0, 1, 4):
+                cell = f"<strong>{cell}</strong>"
             cells.append(f"<td>{cell}</td>")
         tbody.append("<tr>" + "".join(cells) + "</tr>")
     return f"<table><thead><tr>{thead}</tr></thead><tbody>{''.join(tbody)}</tbody></table>"
