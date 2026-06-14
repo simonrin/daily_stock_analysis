@@ -280,6 +280,8 @@ def write_xlsx(path: Path, rows: list[list[str]]) -> None:
             wrap_text = not (cell.column in (3, 7) and cell.row >= 2)
             cell.alignment = Alignment(wrap_text=wrap_text, vertical="top")
             cell.border = border
+    title_cell = ws.cell(row=1, column=1)
+    title_cell.font = Font(bold=True, size=14, color="174A7C")
     for cell in ws[2]:
         cell.font = Font(bold=True)
         cell.fill = header_fill
@@ -288,7 +290,10 @@ def write_xlsx(path: Path, rows: list[list[str]]) -> None:
         url = ths_stock_url(cell.value)
         if url:
             cell.hyperlink = url
-            cell.font = Font(color="0563C1", underline="single")
+            cell.font = Font(bold=True, color="0563C1", underline="single")
+    for row_idx in range(3, ws.max_row + 1):
+        for col_idx in (1, 5):
+            ws.cell(row=row_idx, column=col_idx).font = Font(bold=True)
     ws.freeze_panes = "A3"
     ws.auto_filter.ref = f"A2:{get_column_letter(len(HEADERS))}{ws.max_row}"
     widths = [30, 20, 30, 34, 28, 24, 32]
@@ -321,13 +326,15 @@ def html_table(rows: list[list[str]]) -> str:
             url = ths_stock_url(cell) if idx == 1 else ""
             if url:
                 value = f"<a href=\"{html.escape(url)}\">{value}</a>"
+            if idx in (0, 1, 4):
+                value = f"<strong>{value}</strong>"
             cells.append(f"<td>{value}</td>")
         body.append("<tr>" + "".join(cells) + "</tr>")
     return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
 
 def render_html(rows: list[list[str]], signals: list[dict[str, str]]) -> str:
-    layers = "".join(f"<li>{html.escape(layer)}</li>" for layer in layer_summary())
+    layers = "".join(f"<li><strong>{idx}. {html.escape(layer)}</strong></li>" for idx, layer in enumerate(layer_summary(), 1))
     table = html_table(rows)
     signal_items = "".join(
         "<li>"
@@ -342,7 +349,8 @@ def render_html(rows: list[list[str]], signals: list[dict[str, str]]) -> str:
   <meta charset="utf-8">
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1f2937; line-height: 1.55; }}
-    h2 {{ color: #174A7C; border-bottom: 1px solid #B8D0EA; padding-bottom: 8px; }}
+    h2 {{ color: #174A7C; border-bottom: 2px solid #174A7C; padding-bottom: 8px; font-weight: 800; }}
+    strong {{ font-weight: 800; }}
     table {{ border-collapse: collapse; width: 100%; table-layout: fixed; }}
     th, td {{ border: 1px solid #9BB7D4; padding: 10px; vertical-align: top; word-break: break-word; }}
     th {{ background: #D9EAF7; font-weight: 700; }}
@@ -351,7 +359,7 @@ def render_html(rows: list[list[str]], signals: list[dict[str, str]]) -> str:
 </head>
 <body>
   <h2>本周最值得研究的 {len(layer_summary())} 个卡点层级</h2>
-  <ol>{layers}</ol>
+  <ol class="priority-list">{layers}</ol>
   <h2>核心候选公司横向对比表</h2>
   {table}
   <h2>过去一周公开来源线索</h2>
@@ -364,21 +372,21 @@ def render_html(rows: list[list[str]], signals: list[dict[str, str]]) -> str:
     <li>公司级收入结构：AI、机器人、低空、先进封装等业务真实占比。</li>
   </ol>
   <h2>简明结论</h2>
-  <p>本周研究优先级仍应先看真实供给约束层级，再看个股弹性。AI 数据中心电力/液冷、国产算力芯片与先进封装、高速互连、半导体设备、电网主设备的证据强度较高；机器人、低空经济和新能源高端材料需要更多订单和收入结构验证。本文仅为研究优先级，不构成买入、卖出或持有建议。</p>
+  <p><strong>结论：</strong>本周研究优先级仍应先看<strong>真实供给约束层级</strong>，再看个股弹性。<strong>AI 数据中心电力/液冷、国产算力芯片与先进封装、高速互连、半导体设备、电网主设备</strong>的证据强度较高；机器人、低空经济和新能源高端材料需要更多订单和收入结构验证。本文仅为研究优先级，不构成买入、卖出或持有建议。</p>
 </body>
 </html>
 """
 
 
 def render_text(rows: list[list[str]], signals: list[dict[str, str]]) -> str:
-    lines = [f"本周最值得研究的 {len(layer_summary())} 个卡点层级"]
-    lines.extend(f"{idx}. {layer}" for idx, layer in enumerate(layer_summary(), 1))
+    lines = [f"**本周最值得研究的 {len(layer_summary())} 个卡点层级**"]
+    lines.extend(f"**{idx}. {layer}**" for idx, layer in enumerate(layer_summary(), 1))
     lines.append("")
-    lines.append("核心候选公司横向对比表")
+    lines.append("**核心候选公司横向对比表**")
     lines.append("\t".join(HEADERS))
     lines.extend("\t".join(row) for row in rows)
     lines.append("")
-    lines.append("过去一周公开来源线索")
+    lines.append("**过去一周公开来源线索**")
     if signals:
         lines.extend(
             f"{idx}. {item.get('date', '')} {item.get('theme', '')}: {item.get('title', '')} {item.get('url', '')}".strip()
@@ -387,7 +395,7 @@ def render_text(rows: list[list[str]], signals: list[dict[str, str]]) -> str:
     else:
         lines.append("公开来源待复核。")
     lines.append("")
-    lines.append("本文仅为研究优先级，不构成买入、卖出或持有建议。")
+    lines.append("**结论：** 本文仅为研究优先级，不构成买入、卖出或持有建议。")
     return "\n".join(lines) + "\n"
 
 
