@@ -2,12 +2,19 @@ name: A-Share Supply Chain Bottleneck Weekly
 
 on:
   schedule:
-    # Sunday 08:30 Asia/Shanghai == Sunday 00:30 UTC.
-    - cron: "30 0 * * 0"
+    # Sunday 08:37 Asia/Shanghai. Avoid crowded :00/:30 schedule slots.
+    - cron: "37 8 * * 0"
+      timezone: "Asia/Shanghai"
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/a-share-supply-chain-bottleneck.yml
 
 jobs:
   weekly-report:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[send-bottleneck-now]')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
